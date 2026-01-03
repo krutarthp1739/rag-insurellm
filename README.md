@@ -32,7 +32,7 @@ This phase wires up Terraform state, GitHub OIDC for AWS, and CI/CD for the dev 
 
 ### What we built in Phase A
 - Versioned, encrypted S3 bucket + DynamoDB lock table for Terraform remote state.
-- GitHub OIDC provider and `rag-insurellm-gha-terraform-dev` IAM role restricted to `krutarthpatel/rag-insurellm` on `main`, temporarily with `AdministratorAccess`.
+- GitHub OIDC provider and `rag-insurellm-gha-terraform-dev` IAM role scoped to `krutarthpatel/rag-insurellm` refs, temporarily with `AdministratorAccess`.
 - Dev Terraform stack with default tags and a sample CloudWatch log group to validate apply.
 - CI (fmt/validate) and deploy-to-dev GitHub Actions workflows.
 
