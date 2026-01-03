@@ -9,7 +9,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "REPLACE_ME_TF_STATE_BUCKET"
+    bucket         = "rag-insurellm-tfstate-677276079459"
     key            = "envs/dev/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "rag-insurellm-tf-lock"

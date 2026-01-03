@@ -24,6 +24,39 @@ jobs:
         with:
           terraform_version: 1.6.6
 
+      - name: Debug GitHub OIDC token claims
+        id: debugjwt
+        shell: bash
+        env:
+          JWT: ${{ steps.debugjwt.outputs.jwt }}
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          echo "Requesting OIDC token with audience=sts.amazonaws.com"
+
+          TOKEN_JSON=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+
+          echo "OIDC response (redacted):"
+          echo "$TOKEN_JSON" | python3 -c 'import sys,json; d=json.load(sys.stdin); print({"has_value": "value" in d, "keys": list(d.keys())})'
+
+          JWT=$(echo "$TOKEN_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])')
+
+          echo "jwt=$JWT" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY'
+          import os, json, base64
+          jwt = os.environ["JWT"]
+          parts = jwt.split(".")
+          payload = parts[1] + "=" * (-len(parts[1]) % 4)
+          data = json.loads(base64.urlsafe_b64decode(payload).decode())
+          print("OIDC payload claims:")
+          for k in ["iss","aud","sub","ref","repository","repository_owner","actor","job_workflow_ref"]:
+              if k in data:
+                  print(f"  {k}: {data[k]}")
+          PY
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
