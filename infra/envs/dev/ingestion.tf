@@ -117,7 +117,7 @@ resource "aws_s3_bucket_notification" "raw_to_sqs" {
 
 data "archive_file" "ingest_lambda" {
   type        = "zip"
-  source_dir  = "${path.module}/../../services/ingestion"
+  source_dir  = "${path.module}/../../../services/ingestion"
   output_path = "${path.module}/build/ingest.zip"
 }
 
