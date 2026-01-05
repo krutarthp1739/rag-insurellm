@@ -9,3 +9,10 @@ crash.*.log
 
 # Mac
 .DS_Store
+
+# Build artifacts
+infra/envs/dev/build/
+**/__pycache__/
+
+.terraform/
+terraform.tfstate*

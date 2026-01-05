@@ -29,3 +29,7 @@ jobs:
 
       - name: Terraform validate
         run: terraform validate
+
+      - name: Python syntax check (ingestion lambda)
+        run: python -m compileall .
+        working-directory: services/ingestion
