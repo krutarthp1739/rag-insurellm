@@ -1,12 +1,15 @@
 import hashlib
 import json
 import os
+import random
 import re
+import time
 from datetime import datetime, timezone
 from typing import Dict, List
 from urllib.parse import unquote_plus
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 RAW_BUCKET = os.environ["RAW_BUCKET"]
@@ -16,7 +19,11 @@ S3_VECTORS_NAMESPACE = os.environ.get("S3_VECTORS_NAMESPACE", "default")
 BEDROCK_EMBEDDING_MODEL = os.environ.get("BEDROCK_EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
 
 s3_client = boto3.client("s3")
-bedrock_client = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION"))
+bedrock_client = boto3.client(
+    "bedrock-runtime",
+    region_name=os.environ.get("AWS_REGION"),
+    config=Config(retries={"mode": "adaptive", "max_attempts": 10}),
+)
 
 
 def lambda_handler(event, context):
@@ -65,6 +72,21 @@ def process_s3_event(s3_record: Dict):
 
     for idx, chunk in enumerate(chunks):
         chunk_id = f"{doc_id}:{idx}"
+        vector_key = vector_object_key(chunk_id)
+        if vector_exists(vector_key):
+            print(f"Vector already exists for {chunk_id}, skipping embed")
+            manifest["chunks"].append(
+                {
+                    "chunk_id": chunk_id,
+                    "doc_type": doc_type,
+                    "chunk_text_preview": chunk[:200],
+                    "source_s3_uri": source_uri,
+                    "length": len(chunk),
+                    "created_at": created_at,
+                }
+            )
+            continue
+
         metadata = {
             "doc_id": doc_id,
             "source_s3_uri": source_uri,
@@ -133,15 +155,28 @@ def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> List[st
 
 def embed_text(text: str) -> List[float]:
     payload = json.dumps({"inputText": text})
-    try:
-        response = bedrock_client.invoke_model(modelId=BEDROCK_EMBEDDING_MODEL, body=payload)
-        body = json.loads(response["body"].read())
-        embedding = body.get("embedding") or body.get("vector")
-        if not embedding:
-            raise RuntimeError("Embedding response missing vector")
-        return embedding
-    except (ClientError, BotoCoreError, KeyError, ValueError) as exc:
-        raise RuntimeError(f"Failed to embed text with model {BEDROCK_EMBEDDING_MODEL}: {exc}") from exc
+    max_retries = 8
+    base_delay = 0.5
+
+    for attempt in range(max_retries):
+        try:
+            response = bedrock_client.invoke_model(modelId=BEDROCK_EMBEDDING_MODEL, body=payload)
+            body = json.loads(response["body"].read())
+            embedding = body.get("embedding") or body.get("vector")
+            if not embedding:
+                raise RuntimeError("Embedding response missing vector")
+            time.sleep(random.uniform(0.05, 0.15))
+            return embedding
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code")
+            if error_code == "ThrottlingException" and attempt < max_retries - 1:
+                delay = min(8.0, base_delay * (2**attempt)) * random.uniform(0.75, 1.25)
+                print(f"Throttle on embed attempt {attempt + 1}/{max_retries}, sleeping {delay:.2f}s")
+                time.sleep(delay)
+                continue
+            raise RuntimeError(f"Failed to embed text with model {BEDROCK_EMBEDDING_MODEL}: {exc}") from exc
+        except (BotoCoreError, KeyError, ValueError) as exc:
+            raise RuntimeError(f"Failed to embed text with model {BEDROCK_EMBEDDING_MODEL}: {exc}") from exc
 
 
 def store_vector(chunk_id: str, embedding: List[float], metadata: Dict):
@@ -149,7 +184,7 @@ def store_vector(chunk_id: str, embedding: List[float], metadata: Dict):
     Placeholder for S3 Vectors upsert. Writes payload to the processed bucket so we
     have an auditable artifact until native S3 Vectors APIs are wired in.
     """
-    key = f"vectors/{S3_VECTORS_INDEX}/{S3_VECTORS_NAMESPACE}/{chunk_id}.json"
+    key = vector_object_key(chunk_id)
     payload = {
         "id": chunk_id,
         "index": S3_VECTORS_INDEX,
@@ -166,6 +201,30 @@ def store_vector(chunk_id: str, embedding: List[float], metadata: Dict):
         )
     except (ClientError, BotoCoreError) as exc:
         raise RuntimeError(f"Failed to store vector {chunk_id}: {exc}") from exc
+
+
+def vector_object_key(chunk_id: str) -> str:
+    return f"vectors/{S3_VECTORS_INDEX}/{S3_VECTORS_NAMESPACE}/{chunk_id}.json"
+
+
+def vector_exists(key: str) -> bool:
+    # Treat missing or access-denied vectors as absent so ingestion can continue.
+    try:
+        s3_client.head_object(Bucket=PROCESSED_BUCKET, Key=key)
+        return True
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code")
+
+        # Not found → doesn't exist
+        if error_code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+
+        # Access denied → treat as missing (don't fail ingestion)
+        if error_code in {"403", "AccessDenied", "Forbidden"}:
+            print(f"Warning: access denied checking {key} in processed bucket; treating as missing")
+            return False
+
+        raise
 
 
 def put_manifest(doc_id: str, manifest: Dict):
